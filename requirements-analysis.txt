@@ -1,0 +1,5 @@
+# Tools for OFFLINE analysis only. Do NOT add these to requirements.txt:
+# that file is used to build your bot's Docker image for the tournament.
+pandas
+snowflake-connector-python[pandas]
+google-genai
