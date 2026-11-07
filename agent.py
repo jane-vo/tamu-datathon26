@@ -42,8 +42,8 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "YOUR_TEAM_NAME"
-AGENT_NAME = "EquityBot-v1"
+PARTICIPANT = "GOOFY_GAMBLERS"
+AGENT_NAME = "GoofyPokerBot"
 
 
 # ===== YOUR CODE HERE =====
