@@ -23,13 +23,16 @@ need to change it, and if you break it the judge can't talk to your bot.
 """
 
 import os
+import random
+import time
 import traceback
+from itertools import combinations
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from evaluator import card_rank, card_suit, cards_to_str, omaha_score, warmup  # handy helpers, see evaluator.py
+from evaluator import card_rank, card_suit, cards_to_str, get_table, omaha_score, warmup  # handy helpers, see evaluator.py
 from game import Action, AgentConfig, HandResult, Observation, Street
 
 # Build omaha_score's lookup table now, while the server starts, instead of
@@ -39,72 +42,243 @@ from game import Action, AgentConfig, HandResult, Observation, Street
 warmup()
 
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "JustAsAwesomeAgent"
+PARTICIPANT = "YOUR_TEAM_NAME"
+AGENT_NAME = "EquityBot-v1"
 
 
 # ===== YOUR CODE HERE =====
 
+# ---------------------------------------------------------------------------
+# Tunable settings (change these while testing)
+# ---------------------------------------------------------------------------
+BANK_BUDGET_S = 3.5       # target for OUR OWN compute per half (the bank is 8 s and also pays for
+                          # request overhead, so stay well below it; check the judge's "Faults" report)
+MAX_DECISION_MS = 25.0    # never spend more than this on one decision (hard limit is 1000 ms)
+MIN_SAMPLES = 10
+MAX_SAMPLES = 400
+
+# Raise thresholds on equity (our win chance vs a random hand): (half-pot, pot)
+OPEN_PRE = (0.545, 0.60)      # preflop, nothing to call
+OPEN_POST = (0.60, 0.75)      # postflop, nothing to call
+RERAISE_PRE = (0.58, 0.64)    # facing a bet, preflop
+RERAISE_POST = (0.68, 0.82)   # facing a bet, postflop
+BASE_MARGIN = 0.03            # extra equity needed on top of pot odds to call
+BLUFF_RATE = 0.20             # chance to bet a weak hand when the opponent folds too much
+
+# Preflop strength model, fitted offline (fit_preflop.py) to Monte Carlo equity.
+# Features: see _preflop_features().
+PREFLOP_COEF = [0.42489, 0.0355, -0.07483, -0.24388, 0.02738, -0.00945,
+                -0.00425, 0.00034, 0.00038, -0.01571, 0.37711, -0.07651]
+
+_PAIRS = tuple(combinations(range(5), 2))
+_TRIPLES = tuple(combinations(range(5), 3))
+_WINDOWS = ([0, 1, 2, 3, 4], [1, 2, 3, 4, 5], [2, 3, 4, 5, 6],
+            [3, 4, 5, 6, 7], [4, 5, 6, 7, 8], [8, 0, 1, 2, 3])
+
+
+def _preflop_features(hole):
+    ranks = [c >> 2 for c in hole]
+    suits = [c & 3 for c in hole]
+    cnt = [0] * 9
+    for r in ranks:
+        cnt[r] += 1
+    pair_hi = sum(1 + r / 8 for r in range(9) if cnt[r] == 2)
+    trips = sum(1 for r in range(9) if cnt[r] == 3)
+    quads = sum(1 for r in range(9) if cnt[r] >= 4)
+    sc = [0] * 4
+    for s in suits:
+        sc[s] += 1
+    ace_suited = king_suited = 0
+    for c in hole:
+        if sc[c & 3] >= 2:
+            if c >> 2 == 8:
+                ace_suited = 1
+            elif c >> 2 == 7:
+                king_suited = 1
+    conn = max(sum(1 for r in w if cnt[r]) for w in _WINDOWS)
+    return [1.0, pair_hi, trips, quads, sum(n * (n - 1) // 2 for n in sc), ace_suited,
+            king_suited, conn, sum(1 for r in range(9) if cnt[r]),
+            cnt[8] + cnt[7] + cnt[6], sum(ranks) / 40.0, max(sc)]
+
+
+def preflop_equity(hole) -> float:
+    """Estimated win chance of 5 hole cards vs a random hand (no simulation, ~10 microseconds)."""
+    e = sum(c * f for c, f in zip(PREFLOP_COEF, _preflop_features(hole)))
+    return min(0.75, max(0.28, e))
+
+
+def mc_equity(hole, board, n, rng) -> float:
+    """Monte Carlo win chance vs a random opponent hand: deal the missing board cards and an
+    opponent hand n times and score both with the Omaha rule (ties count half)."""
+    table = get_table()
+    dead = set(hole) | set(board)
+    rem = [c for c in range(36) if c not in dead]
+    need = 5 - len(board)
+    hb = [1 << c for c in hole]
+    hm = [hb[i] | hb[j] for i, j in _PAIRS]
+    bb0 = [1 << c for c in board]
+    sample = rng.sample
+    wins = 0.0
+    if need == 0:  # river: our score and the board masks never change
+        bm = [bb0[i] | bb0[j] | bb0[k] for i, j, k in _TRIPLES]
+        mine = max([table[h | b] for h in hm for b in bm])
+        for _ in range(n):
+            ob = [1 << c for c in sample(rem, 5)]
+            om = [ob[i] | ob[j] for i, j in _PAIRS]
+            opp = max([table[h | b] for h in om for b in bm])
+            wins += 1.0 if mine > opp else (0.5 if mine == opp else 0.0)
+        return wins / n
+    for _ in range(n):
+        d = sample(rem, need + 5)
+        bb = bb0 + [1 << c for c in d[:need]]
+        bm = [bb[i] | bb[j] | bb[k] for i, j, k in _TRIPLES]
+        ob = [1 << c for c in d[need:]]
+        om = [ob[i] | ob[j] for i, j in _PAIRS]
+        mine = max([table[h | b] for h in hm for b in bm])
+        opp = max([table[h | b] for h in om for b in bm])
+        wins += 1.0 if mine > opp else (0.5 if mine == opp else 0.0)
+    return wins / n
+
+
 def new_half(config: AgentConfig, memory: dict) -> None:
-    """Called at the start of each half-match (1000 hands).
-
-    `memory` is a fresh, empty dict every half. Store anything you want to
-    remember between hands in it, e.g. memory["opp_raises"] = 0.
-    `config` holds the match settings (starting_stack, big_blind, ...).
-
-    In the tournament, each half runs in a brand-new copy of your server,
-    so nothing you learn in one half carries over to the other half.
-    """
+    """Called at the start of each half-match (1000 hands). Set up everything we track."""
     memory["hands_played"] = 0
+    memory["rng"] = random.Random(2026)
+    memory["t_used"] = 0.0            # our own compute time this half (seconds)
+    memory["us_per_sample"] = 60.0    # running estimate of one Monte Carlo sample (microseconds)
+    memory["num_hands"] = config.num_hands
+    # opponent model (all within this half)
+    memory["opp_actions"] = 0         # opponent actions seen
+    memory["opp_raises"] = 0          # ...of which raises
+    memory["i_raised_hand"] = False   # did we raise in the current hand?
+    memory["my_raise_hands"] = 0      # hands where we raised
+    memory["opp_folds_to_me"] = 0     # of those, hands that ended with the opponent folding
+    memory["seen_hand"] = -1          # hand_index of the hand whose history we last counted
+    memory["seen_actions"] = 0        # how many history entries of that hand we counted
+
+
+def _opp_stats(memory):
+    """(opponent raise rate, opponent fold rate when we raise), with sensible priors."""
+    raise_rate = (memory["opp_raises"] + 3) / (memory["opp_actions"] + 10)       # prior ~30%
+    fold_rate = (memory["opp_folds_to_me"] + 3) / (memory["my_raise_hands"] + 8)  # prior ~38%
+    return raise_rate, fold_rate
+
+
+def _update_from_history(obs, memory):
+    if obs.hand_index != memory["seen_hand"]:
+        memory["seen_hand"] = obs.hand_index
+        memory["seen_actions"] = 0
+        memory["i_raised_hand"] = False
+    hist = obs.action_history
+    for a in hist[memory["seen_actions"]:]:
+        if a.is_me:
+            if a.action in (Action.RAISE_HALF, Action.RAISE_POT) and not memory["i_raised_hand"]:
+                memory["i_raised_hand"] = True
+                memory["my_raise_hands"] += 1
+        else:
+            memory["opp_actions"] += 1
+            if a.action in (Action.RAISE_HALF, Action.RAISE_POT):
+                memory["opp_raises"] += 1
+    memory["seen_actions"] = len(hist)
+
+
+def _sample_count(obs, memory) -> int:
+    """How many simulations we can afford right now (spreads our budget over the half)."""
+    remaining_hands = max(1, memory["num_hands"] - obs.hand_index)
+    left_s = BANK_BUDGET_S - memory["t_used"]
+    if left_s <= 0:
+        return MIN_SAMPLES
+    per_decision_ms = left_s / (remaining_hands * 2.4) * 1000.0
+    pot = obs.pot
+    weight = 0.5 if pot <= 8 else (1.0 if pot <= 30 else 2.0)  # big pots deserve more thinking
+    ms = min(MAX_DECISION_MS, per_decision_ms * weight)
+    n = int(ms * 1000.0 / memory["us_per_sample"])
+    return max(MIN_SAMPLES, min(MAX_SAMPLES, n))
+
+
+def _equity(obs, memory) -> float:
+    if obs.street == Street.PREFLOP:
+        return preflop_equity(obs.hole_cards)
+    n = _sample_count(obs, memory)
+    t0 = time.perf_counter()
+    e = mc_equity(obs.hole_cards, obs.board, n, memory["rng"])
+    dt = time.perf_counter() - t0
+    memory["us_per_sample"] = 0.9 * memory["us_per_sample"] + 0.1 * (dt / n * 1e6)
+    return e
+
+
+def _decide(obs: Observation, memory: dict) -> Action:
+    legal = obs.legal_actions
+    can_half = Action.RAISE_HALF in legal
+    can_pot = Action.RAISE_POT in legal
+    pre = obs.street == Street.PREFLOP
+    raise_rate, fold_rate = _opp_stats(memory)
+    e = _equity(obs, memory)
+
+    def raise_with(want_pot: bool) -> Action:
+        if want_pot and can_pot:
+            return Action.RAISE_POT
+        return Action.RAISE_HALF if can_half else Action.RAISE_POT
+
+    def commits_too_much(act: Action) -> bool:
+        """A raise that puts most of our stack in needs a strong hand."""
+        amount = obs.raise_to.get(act, 0) - obs.my_bet
+        return obs.my_stack > 0 and amount / (obs.my_stack + 0.0) > 0.5 and e < 0.70
+
+    # ----- nothing to call: check or bet -----
+    if obs.to_call == 0:
+        half_t, pot_t = OPEN_PRE if pre else OPEN_POST
+        if (can_half or can_pot) and e >= half_t:
+            act = raise_with(e >= pot_t)
+            if not commits_too_much(act):
+                return act
+        if can_half and fold_rate > 0.55 and memory["rng"].random() < BLUFF_RATE:
+            return Action.RAISE_HALF
+        return Action.CHECK_CALL
+
+    # ----- facing a bet: fold, call or raise -----
+    price = obs.to_call / (obs.pot + obs.to_call)
+    margin = BASE_MARGIN + 0.025 * obs.raises_this_street + 0.05 * min(1.0, obs.to_call / max(1, obs.pot - obs.to_call))
+    if raise_rate > 0.5:       # very aggressive opponent: their bets mean less
+        margin -= 0.03
+    elif raise_rate < 0.15:    # passive opponent: respect their bets
+        margin += 0.03
+    half_t, pot_t = RERAISE_PRE if pre else RERAISE_POST
+    if (can_half or can_pot) and e >= half_t:
+        act = raise_with(e >= pot_t)
+        if not commits_too_much(act):
+            return act
+    if e >= price + margin:
+        return Action.CHECK_CALL
+    return Action.FOLD
 
 
 def choose_action(obs: Observation, memory: dict) -> Action:
     """Called every time it is your turn. Return one of obs.legal_actions.
 
-    What you can see in obs:
-        hand_index          which hand of the half this is (0, 1, 2, ...)
-        street              Street.PREFLOP, Street.FLOP, Street.TURN or Street.RIVER
-        hole_cards          your 5 cards as ints, sorted ascending (0-35)
-        board               board (community) cards seen so far (0, 3, 4 or 5 ints)
-        pot                 total chips both players put in this hand
-        to_call             chips you must add to match the opponent
-        my_bet, opp_bet     chips you,opponent put in on THIS street
-        my_stack, opp_stack chips each player still has behind
-        is_button           True if you are the button (small blind)
-        legal_actions       the Actions you may return right now
-        raise_to            {RAISE_HALF: total, RAISE_POT: total} for legal raises
-        min_raise_to        smallest normal raise total (all-ins may be lower)
-        raises_this_street  raises so far this street (max 4)
-        action_history      this hand's actions so far; each has
-                            street, is_me, action, amount, street_total
-        big_blind           size of the big blind in chips
-
-    Actions: Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT
-    Cards are ints: card_rank(c) is 0 (six) .. 8 (ace), card_suit(c) is 0..3,
-    and cards_to_str(obs.hole_cards) prints them like "6h 7c 9s Kd Ah".
-    Once all 5 board cards are out, omaha_score(obs.hole_cards, obs.board)
-    scores your hand (higher is better).
+    Plan: estimate our win chance vs a random hand (preflop: fitted formula; later streets:
+    Monte Carlo), compare it with the pot odds, and bet/raise/call/fold. Any crash falls back
+    to a legal safe action so a bug never counts as an error.
     """
-
-    # Simple example of a heuristic bot, which just checks when it is of no cost, otherwise folds
-    # Replace this with your strategy!
-    if obs.to_call == 0:
-        return Action.CHECK_CALL
-    return Action.FOLD
+    t0 = time.perf_counter()
+    try:
+        _update_from_history(obs, memory)
+        action = _decide(obs, memory)
+        if action not in obs.legal_actions:
+            raise ValueError("illegal action chosen")
+    except Exception:
+        traceback.print_exc()
+        action = Action.CHECK_CALL if obs.to_call == 0 else Action.FOLD
+    memory["t_used"] += time.perf_counter() - t0
+    return action
 
 
 def on_hand_end(result: HandResult, memory: dict) -> None:
-    """Called once for every finished hand. Optional: learn from what happened.
-
-    To save time, the judge sends finished hands along with your next
-    decision request, so this always runs BEFORE choose_action() sees the
-    next hand. (The last hands of a half arrive at the end of the half.)
-
-    result has: hand_index, my_net (chips won or lost), pot,
-    went_to_showdown, board (cards revealed), opp_hole (opponent's cards,
-    only after a showdown, else None), winner ('me', 'opp' or 'split').
-    """
+    """Called once for every finished hand: update the opponent model."""
     memory["hands_played"] += 1
+    # No showdown and we won chips = the opponent folded. Count it if we had raised.
+    if memory["i_raised_hand"] and not result.went_to_showdown and result.my_net > 0:
+        memory["opp_folds_to_me"] += 1
 
 # ===== END OF YOUR CODE =====
 
