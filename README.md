@@ -1,6 +1,7 @@
 # Goofy Gamblers present: Self-improving poker bot utilizing Snowflake & Gemini
 
 **TAMU Datathon Heads Up Challenge • Best Use of Snowflake • Best Use of Google AI Studio**
+
 Heads-up Short Deck 5-Card Pot-Limit Omaha • Python
 
 
