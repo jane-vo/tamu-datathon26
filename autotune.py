@@ -40,16 +40,20 @@ import harness as H
 # Guardrails: the ONLY settings the loop may change, and how far.
 # pair = (half-pot threshold, pot threshold) on equity; first must be <= second.
 # ---------------------------------------------------------------------------
-TUNABLES = {
-    "OPEN_PRE":     {"kind": "pair",   "lo": 0.45, "hi": 0.65, "cap": 0.80},
-    "OPEN_POST":    {"kind": "pair",   "lo": 0.50, "hi": 0.80, "cap": 0.92},
-    "RERAISE_PRE":  {"kind": "pair",   "lo": 0.50, "hi": 0.70, "cap": 0.85},
-    "RERAISE_POST": {"kind": "pair",   "lo": 0.55, "hi": 0.85, "cap": 0.95},
-    "BASE_MARGIN":  {"kind": "scalar", "lo": 0.00, "hi": 0.10},
-    "BLUFF_RATE":   {"kind": "scalar", "lo": 0.00, "hi": 0.40},
+TUNABLES = {   # the decision-model settings of agent.py v4 (numpy engine)
+    "CALL_MARGIN":    {"kind": "scalar", "lo": 0.00, "hi": 0.06},
+    "RAISE_EDGE":     {"kind": "scalar", "lo": 0.00, "hi": 0.10},
+    "RAISE_EDGE_PRE": {"kind": "scalar", "lo": 0.10, "hi": 1.00},
+    "FOLD_PRIOR":     {"kind": "scalar", "lo": 0.10, "hi": 0.50},
+    "BET_PRIOR":      {"kind": "scalar", "lo": 0.15, "hi": 0.60},
+    "RANGE_TAU":      {"kind": "scalar", "lo": 0.06, "hi": 0.30},
+    "BLUFF_FLOOR":    {"kind": "scalar", "lo": 0.05, "hi": 0.40},
+    "SIZE_FOLD":      {"kind": "scalar", "lo": 0.00, "hi": 0.20},
 }
-# Deliberately NOT tunable here: BANK_BUDGET_S (a bad value = time-bank forfeit), MAX_DECISION_MS,
-# MIN_SAMPLES, MAX_SAMPLES, PREFLOP_COEF, and any code.
+# Deliberately NOT tunable here: the time settings (BANK_TARGET_S, BANK_BUDGET_S, BANK_SAFE_S,
+# OVERHEAD_MS, POOL_MIN, POOL_MAX: a bad value = an empty time bank), PREFLOP_COEF, the v3
+# fallback thresholds (OPEN_PRE ... BLUFF_RATE, only used without numpy), and any code.
+# (validate() still understands "pair" settings, for older agent files.)
 
 BASELINES = ("random", "calling_station", "always_pot", "always_half")
 
@@ -57,14 +61,22 @@ GAME = """Game: heads-up Short Deck (36 cards, 6..A) 5-card Pot-Limit Omaha, 80-
 Hand = exactly 2 hole cards + exactly 3 board cards. Short-deck ranking: flush beats full house, three of a kind beats a straight.
 Actions: FOLD, CHECK_CALL, RAISE_HALF (half pot), RAISE_POT. Matches are duplicate (same cards both seats)."""
 
-NOTES = """How the settings are used (only propose a change to the setting that GOVERNS the situation you cite):
-- OPEN_PRE / OPEN_POST = [half-pot threshold, pot threshold] on equity; used ONLY when there is nothing to call (to_call = 0).
-  Preflop, the small blind always faces to_call = 1, so OPEN_PRE only matters for the big blind's option after a limp.
-- RERAISE_PRE / RERAISE_POST = same shape; used only when FACING a bet and considering a raise.
-- BASE_MARGIN = extra equity required on top of pot odds to CALL a bet (it grows with raises and bet size).
-- BLUFF_RATE = chance to bet a weak hand when the opponent folds a lot.
-- Evidence columns: AVG_NET_BB is the average result in big blinds of the WHOLE hand after taking that action.
-  EXPLORED=1 rows had a random action, so comparing actions inside the same situation is unbiased.
+NOTES = """How the bot decides: it samples possible opponent hands, re-weights them after every opponent action by
+how likely THIS opponent (its measured bet / call / fold frequencies) is to take that action with that hand, then
+picks the action with the highest expected value (fold / call / half-pot / pot). Only propose a change to the
+setting that GOVERNS the situation you cite:
+- CALL_MARGIN = equity tax on CALLING a bet when more streets are to come (doubled out of position). Higher = fold more.
+- RAISE_EDGE = postflop, a bet/raise must beat checking/calling by this share of the pot. Higher = fewer bets.
+- RAISE_EDGE_PRE = the same preflop (deliberately large: the bot keeps preflop pots small; unraised preflop it
+  never raises and calls by the preflop formula).
+- FOLD_PRIOR = assumed share of hands an opponent folds to a bet before we have data. It drives bluffing early on.
+- BET_PRIOR = assumed share of the time an opponent bets when checked to, before we have data.
+- RANGE_TAU = how sharply opponent actions narrow its range (bigger = trust opponent actions less).
+- BLUFF_FLOOR = share of an opponent's bets/raises that we assume can be any hand. Higher = call bets wider.
+- SIZE_FOLD = how much more often (relative) an opponent folds to a pot-size raise than to a half-pot raise.
+- Evidence columns: EQUITY is our win chance vs a RANDOM hand (not vs the opponent's range). AVG_NET_BB is the average
+  result in big blinds of the WHOLE hand after that action. EXPLORED=1 rows had a random action, so comparing
+  actions inside the same situation is unbiased.
 - A change only affects hands where its setting applies, so its effect per deal is small. Be skeptical of small N."""
 
 LOG_COLS = ["timestamp", "run_id", "iteration", "setting", "old_value", "new_value", "reason", "stage_reached",
@@ -90,7 +102,7 @@ def read_settings(text):
         m = _setting_re(name).search(text)
         if not m:
             raise SystemExit(f"agent file has no line like '{name} = ...'. autotune expects the tunable-settings "
-                             f"block that came with agent.py v1 (names: {', '.join(TUNABLES)}).")
+                             f"block of agent.py v4 (names: {', '.join(TUNABLES)}).")
         found[name] = ast.literal_eval(m.group(2).strip())
     return found
 

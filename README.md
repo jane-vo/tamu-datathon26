@@ -11,15 +11,31 @@ Most teams will make their agent by using one-shot programming. We built a loop 
 
 ## The bot
 
-`agent.py` is a small, fast, crash-proof equity bot (drafted with Claude, then tuned with the loop below).
+`agent.py` (v4) is a fast, crash-proof equity bot that models each opponent (drafted with Claude, then tuned with the loop below).
 
-- **Preflop:** a formula fitted offline (`fit_preflop.py`) to Monte Carlo equity over thousands of random hands. It costs microseconds, so the time bank is saved for postflop.
-- **Flop, turn, river:** Monte Carlo win chance vs a random hand under the exact 2-hole + 3-board Omaha rule, compared to pot odds to fold, call, bet half-pot or bet pot.
-- **Opponent model:** tracks raise frequency and fold-to-raise within a half, then calls wider against maniacs and bluffs more against folders.
+- **numpy engine:** vectorised Omaha scoring (every 2-hole × 3-board combination is one table lookup), about 20× faster than pure Python. Each decision simulates hundreds of opponent hands instead of about 60.
+- **Opponent range (particle filter):** at the start of a hand the bot samples possible opponent hands. Every opponent action then re-weights them by how likely *this* opponent is to take that action with that hand, using its measured bet, call, fold and re-raise rates. A maniac's bets barely narrow its range; a nit's bets narrow it a lot.
+- **Expected-value decisions:** fold, call, half-pot and pot are compared by expected chips. Raises use the opponent's measured fold rate (tracked separately for facing a first bet and facing a re-raise), our equity against the hands that would call, and what happens when the strongest hands re-raise.
+- **Preflop:** keeps pots small. It never open-raises, and it calls using a formula fitted offline (`fit_preflop.py`) to Monte Carlo equity. Most of its edge comes after the flop.
 - **Built for the rules:**
-  - A time governor spreads about 2.5 s of our own compute across each half and spends more on big pots (`BANK_BUDGET_S`).
-  - Any exception falls back to a legal check or fold, so a bug can never trigger the five-error forfeit.
+  - The judge charges our thinking *plus* about 0.7 ms of request handling per call. The compute budget therefore adapts to how many requests the half needs, and a safety valve switches to zero-compute play before the 8 s bank could run out.
+  - Any exception falls back to a legal check or fold, so a bug can never trigger the five-error forfeit. Without numpy, the v3 pure-Python bot plays instead.
   - No network and no writes outside `/tmp` at match time. Both outside tools run offline.
+
+**v3 → v4**, duplicate matches, bb/deal, 4 seeds × 1000 deals per opponent (95% CI of the paired difference):
+
+| Opponent | v3 | v4 | v4 − v3 |
+|---|---|---|---|
+| random | +7.35 | +9.48 | +2.13 [+1.28, +2.98] |
+| calling_station | +7.84 | +9.63 | +1.79 [+1.46, +2.13] |
+| always_pot | +6.12 | +7.53 | +1.41 [+0.65, +2.17] |
+| always_half | +11.00 | +12.29 | +1.29 [+0.66, +1.92] |
+| Gemini bluffer / maniac / nit | +9.42 / +5.73 / +3.10 | +10.28 / +6.38 / +3.79 | +0.87 / +0.65 / +0.69 |
+| Gemini station / trapper | +8.86 / +12.21 | +10.66 / +14.19 | +1.81 / +1.98 |
+| **v3 itself** | +0.06 | **+1.05** | **+0.99 [+0.53, +1.44]** |
+| **Mean** | +6.03 | **+7.31** | **+1.28** |
+
+In five real HTTP judge matches against v3 (1000 deals each), v4 came out ahead every time: +0.54 to +0.71 bb/deal, pooled +0.63 [+0.31, +0.95]. Each single match is a CHOP, because one 1000-deal match against a close copy of itself can't separate an edge that small. v4 also used less of the time bank: 5.4–6.3 s against v3's 6.1–7.3 s.
 
 ## The loop (Snowflake + Gemini)
 

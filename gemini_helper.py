@@ -57,20 +57,25 @@ def settings_block(agent_path="agent.py"):
         return "(could not read the tunable settings from agent.py)"
 
 
+def _autotune_notes():
+    """How each setting is used: one description shared with autotune.py, so they never disagree."""
+    try:
+        import autotune
+        return autotune.NOTES
+    except Exception:
+        return "(see the comments next to each setting)"
+
+
 def cmd_analyze(args):
     data = "\n\n".join(open(p, encoding="utf-8").read() for p in args.files)
     prompt = f"""You are helping tune a poker bot for this competition.
 {GAME}
 
-The bot estimates win chance vs a random hand (formula preflop, Monte Carlo later streets), compares it to pot odds,
-and uses these tunable settings:
+The bot's settings (only the "Decision model" block is meant to be tuned; the time settings and the v3
+fallback thresholds are off limits):
 {settings_block(args.agent)}
 
-How the settings are used (important: only propose a change to the setting that GOVERNS the situation you cite):
-- OPEN_PRE / OPEN_POST = (half-pot threshold, pot threshold) apply ONLY when there is nothing to call (to_call = 0).
-  Preflop, the small blind always faces to_call = 1, so OPEN_PRE only matters for the big blind's option after a limp.
-- RERAISE_PRE / RERAISE_POST apply only when FACING a bet and considering a raise.
-- BASE_MARGIN is extra equity required on top of pot odds to CALL a bet (it grows with raises and bet size).
+{_autotune_notes()}
 - Units: HAND_NET_CHIPS and AVG_NET are chips (2 chips = 1 bb), not bb, unless a column says BB.
 - Only compare actions inside the same situation (same TO_CALL > 0 or = 0 group); FOLD is only legal when facing a bet.
 - A change only affects the hands where its setting applies, so its effect on bb/deal over a whole match is small.

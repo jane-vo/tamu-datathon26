@@ -195,3 +195,55 @@ def test_reads_port_from_environment():
 # ---------------------------------------------------------------------------
 # Add your own tests below, e.g. "with two aces preflop my bot raises".
 # ---------------------------------------------------------------------------
+
+def test_numpy_engine_matches_omaha_score():
+    # The vectorised scorer must rank hands exactly like the official evaluator.
+    module = load_agent()
+    if not module.HAVE_NP:
+        pytest.skip("numpy not installed: the bot uses its pure-Python fallback")
+    import numpy as np
+    from evaluator import omaha_score
+    rng = random.Random(7)
+    for _ in range(300):
+        cards = rng.sample(range(36), 15)
+        h1, h2, board = cards[:5], cards[5:10], cards[10:]
+        tk = module._trip_keys(np.array(board))
+        s1 = module._best(module._pair_keys(np.array(h1)), tk)
+        s2 = module._best(module._pair_keys(np.array(h2)), tk)
+        o1, o2 = omaha_score(h1, board), omaha_score(h2, board)
+        assert (s1 > s2) == (o1 > o2) and (s1 == s2) == (o1 == o2)
+        assert module._my_table(h1)[tk].max() == s1
+
+
+def test_run_out_sampler_never_reuses_cards():
+    module = load_agent()
+    if not module.HAVE_NP:
+        pytest.skip("numpy not installed")
+    import numpy as np
+    g = np.random.default_rng(1)
+    mask = np.zeros((300, 36), bool)
+    mask[::2, [5, 6, 7, 8, 9]] = True       # two kinds of opponent hand
+    mask[1::2, [20, 21, 22, 23, 24]] = True
+    rem = np.arange(5, 30)
+    for need in (1, 2):
+        cards = module._draw_few(mask, rem, need, g)
+        assert np.isin(cards, rem).all()
+        assert not np.take_along_axis(mask, cards, 1).any()
+        if need == 2:
+            assert (cards[:, 0] != cards[:, 1]).all()
+
+
+def test_fallback_without_numpy_still_plays(bot):
+    # If numpy were missing, the bot must still play legal actions (v3 pure-Python logic).
+    module, client = bot
+    module.HAVE_NP = False
+    start_half(client)
+    play_hands(client, 40, seed="no-numpy")
+
+
+def test_time_bank_safety_valve(bot):
+    # Once the estimated time bank use passes BANK_SAFE_S, play must stay legal and cheap.
+    module, client = bot
+    module.BANK_SAFE_S = 0.0
+    start_half(client)
+    play_hands(client, 40, seed="valve", raise_rate=0.5)
