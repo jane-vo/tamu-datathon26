@@ -7,7 +7,12 @@ Heads-up Short Deck 5-Card Pot-Limit Omaha • Python
 
 Most teams will make their agent by using one-shot programming. We built a loop that measures it. Every decision is logged to **Snowflake**, a fair-comparison query shows where the bot leaks chips, **Google AI Studio (Gemini)** proposes fixes and writes tougher opponents, and a change to the agent occurs only if it wins with a 95% confidence interval above zero.
 
----
+## 📖 Table of Contents
+- [The bot](#the-bot)
+- [The loop](#the-loop)
+- [Snowflake: evidence layer](#snowflake-evidence-layer)
+- [Google AI Studio (Gemini): improvement engine](#google-ai-studio-gemini-improvement-engine)
+- [When a change is real](#when-a-change-is-real)
 
 ## The bot
 
@@ -50,7 +55,27 @@ In five real HTTP judge matches against v3 (1000 deals each), v4 came out ahead 
                     gemini_helper.py sparring ──► harder opponents (sparring/)
 ```
 
-### Snowflake: the evidence layer
+One command runs the whole evidence loop:
+
+```bash
+python gemini_helper.py optimize            # or: python autotune.py
+```
+
+1. **Data:** self-play against the baselines and the Gemini sparring bots, with 10% random actions (`harness_log.py`).
+2. **Snowflake:** logs are uploaded and the fair-comparison queries from `analysis.sql` run on that iteration's data only.
+3. **Gemini:** receives the results plus everything already tested, and must reply with strict JSON (up to 3 single-setting changes).
+4. **Guardrails:** a whitelist and numeric bounds. The time budget, model coefficients and any code are off limits; refused proposals are logged.
+5. **Testing:** each change is tested alone against the current bot on identical cards. A cheap *screen* must show a gain, then a *confirmation* on fresh seeds must have its 95% interval entirely above 0 (and no opponent significantly worse).
+6. **Output:** adopted changes go to `agent_candidate.py`; `agent.py` is never edited unless `--apply` is passed, and then only if the tests pass.
+
+Every proposal, adopted or not, is written to `logs/autotune_log.csv` and `logs/autotune_report.md`:
+
+<!-- paste the table printed at the end of a run (or the table from logs/autotune_report.md) here -->
+
+**What this loop already caught:** in a test run, all three of Gemini's suggestions passed the cheap screen with small positive gains, and all three turned negative on fresh seeds. A single-stage test would have adopted them.
+
+
+### Snowflake: evidence layer
 - Every self-play decision becomes a row: street, position, hole cards, board, estimated equity, pot, price to call, action, and the hand's final result. Matches get their own table with confidence intervals and compute time.
 - We play two kinds of runs: **eps = 0** (clean strength measurement) and **eps = 0.1**, where 10% of actions are replaced by a random legal action and flagged `EXPLORED = 1`.
 - **Query 2 in `analysis.sql` is the key one.** Because the random actions are independent of the bot's preferences, comparing actions inside an equity bucket is an unbiased estimate of what each choice is worth. Ordinary logs can't tell you that.
@@ -62,7 +87,7 @@ In five real HTTP judge matches against v3 (1000 deals each), v4 came out ahead 
 2. **Tuning suggestions:** `gemini_helper.py analyze` sends the Snowflake results plus our tunable settings to Gemini and asks for the likely leaks, one concrete setting change for each, and how many hands are needed to confirm it.
 3. **Nothing is trusted on faith.** Each suggestion is run as `--param NAME=VALUE --version <label> --eps 0` and kept only if it clears the bar below.
 
-## How we decide a change is real
+## When a change is real
 
 - Matches are **duplicate** (both bots get the same cards), the same format as the tournament.
 - A hand outcome has a standard deviation of about **25 bb per deal**, so small edges need **thousands of hands**. We keep a change only if its 95% confidence interval is entirely above 0.
