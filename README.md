@@ -9,7 +9,7 @@ Most teams will make their agent by using one-shot programming. We built a loop 
 
 ## 📖 Table of Contents
 - [The bot](#the-bot)
-- [The loop](#the-loop)
+- [The loop](#the-loop-snowflake-gemini)
 - [Snowflake: evidence layer](#snowflake-evidence-layer)
 - [Google AI Studio (Gemini): improvement engine](#google-ai-studio-gemini-improvement-engine)
 - [When a change is real](#when-a-change-is-real)
@@ -82,7 +82,7 @@ Every proposal, adopted or not, is written to `logs/autotune_log.csv` and `logs/
 - Snowflake's built-in assistant (CoCo) was blocked on our account, so we exported query results and drove the analysis from the terminal through Gemini instead.
 - Loaded files move to `logs/loaded/` so nothing is uploaded twice.
 
-### Google AI Studio (Gemini): the improvement engine
+### Google AI Studio (Gemini): improvement engine
 1. **Sparring partners:** `gemini_helper.py sparring` has Gemini write opponents in different styles (bluffer, trapper, nit and so on) as ready-to-run bot files. They're wrapped so illegal or crashing output falls back to a safe action. The baselines are weak, so this is how we avoid overfitting to them.
 2. **Tuning suggestions:** `gemini_helper.py analyze` sends the Snowflake results plus our tunable settings to Gemini and asks for the likely leaks, one concrete setting change for each, and how many hands are needed to confirm it.
 3. **Nothing is trusted on faith.** Each suggestion is run as `--param NAME=VALUE --version <label> --eps 0` and kept only if it clears the bar below.
