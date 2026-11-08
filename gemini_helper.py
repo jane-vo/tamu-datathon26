@@ -3,10 +3,15 @@ gemini_helper.py - use Google AI Studio (Gemini) as an OFFLINE helper. Your bot 
 
 Setup:
     pip install -r requirements-analysis.txt
+    put GEMINI_API_KEY=your key in the .env file in the repo root (git-ignored), or set it in your shell:
     $env:GEMINI_API_KEY="your key"            (PowerShell;  Git Bash: export GEMINI_API_KEY=...)
     $env:GEMINI_MODEL="..."                   optional: use a model name that AI Studio lists for your key
 
-Two jobs:
+Three jobs:
+  0) optimize  - the autonomous, guard-railed tuning loop (all the work is in autotune.py)
+       python gemini_helper.py optimize                 # full run
+       python gemini_helper.py optimize --quick         # ~10 minute demo run
+       python gemini_helper.py optimize --help          # every option
   1) analyze   - give it query results from Snowflake and get concrete tuning suggestions
        python gemini_helper.py analyze results.txt
   2) sparring  - have it write an opponent bot in a given style, saved as a ready-to-run bot file
@@ -19,7 +24,10 @@ NEVER commit your API key. Do not paste it into chats or files.
 """
 import argparse, datetime, os, re, sys
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+import envfile
+envfile.load()                     # GEMINI_API_KEY / GEMINI_MODEL from .env (shell variables win)
+
+MODEL =os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 GAME = """Game: heads-up Short Deck (36 cards, 6..A) 5-card Pot-Limit Omaha, 80-chip stacks (40 big blinds, big blind = 2),
 reset every hand. Hand = exactly 2 hole cards + exactly 3 board cards. Short-deck ranking: flush beats full house,
@@ -31,48 +39,10 @@ board (0,3,4 or 5 ints), pot, to_call, my_bet, opp_bet, my_stack, opp_stack, is_
 raise_to (dict Action->int), min_raise_to, raises_this_street, action_history (entries with .street .is_me .action .amount .street_total), big_blind."""
 
 
-def cmd_export(args):
-    """Pull Query 2 results directly from Snowflake using environment variables."""
-    try:
-        import snowflake.connector
-    except ImportError:
-        sys.exit("snowflake-connector-python is not installed. Run: pip install snowflake-connector-python[pandas]")
-    
-    missing = [k for k in ("SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD") if not os.environ.get(k)]
-    if missing:
-        sys.exit("Set these environment variables first: " + ", ".join(missing))
-
-    print("Connecting to Snowflake...")
-    conn = snowflake.connector.connect(
-        account=os.environ["SNOWFLAKE_ACCOUNT"],
-        user=os.environ["SNOWFLAKE_USER"],
-        password=os.environ["SNOWFLAKE_PASSWORD"],
-        warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
-        database=os.environ.get("SNOWFLAKE_DATABASE", "POKER_BOT"),
-        schema=os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC"),
-        enable_server_session_keep_alive_auto_detection=True
-    )
-
-    query = """
-    SELECT STREET, FLOOR(EQUITY * 10) / 10 AS EQUITY_BUCKET, ACTION,
-           COUNT(*) AS N, ROUND(AVG(HAND_NET_CHIPS), 2) AS AVG_NET
-    FROM DECISIONS
-    WHERE EXPLORED = 1 AND EQUITY IS NOT NULL
-    GROUP BY 1, 2, 3 HAVING COUNT(*) >= 30
-    ORDER BY STREET, EQUITY_BUCKET, ACTION;
-    """
-
-    import pandas as pd
-    df = pd.read_sql(query, conn)
-    df.to_csv(args.out, index=False)
-    conn.close()
-    print(f"Successfully exported Query 2 results to {args.out} ({len(df)} rows).")
-
-
 def ask(prompt):
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        sys.exit("Set GEMINI_API_KEY first (see the top of this file).")
+        sys.exit("Set GEMINI_API_KEY in the .env file (or your shell) first.")
     from google import genai
     client = genai.Client(api_key=key)
     return client.models.generate_content(model=MODEL, contents=prompt).text
@@ -95,6 +65,15 @@ def cmd_analyze(args):
 The bot estimates win chance vs a random hand (formula preflop, Monte Carlo later streets), compares it to pot odds,
 and uses these tunable settings:
 {settings_block(args.agent)}
+
+How the settings are used (important: only propose a change to the setting that GOVERNS the situation you cite):
+- OPEN_PRE / OPEN_POST = (half-pot threshold, pot threshold) apply ONLY when there is nothing to call (to_call = 0).
+  Preflop, the small blind always faces to_call = 1, so OPEN_PRE only matters for the big blind's option after a limp.
+- RERAISE_PRE / RERAISE_POST apply only when FACING a bet and considering a raise.
+- BASE_MARGIN is extra equity required on top of pot odds to CALL a bet (it grows with raises and bet size).
+- Units: HAND_NET_CHIPS and AVG_NET are chips (2 chips = 1 bb), not bb, unless a column says BB.
+- Only compare actions inside the same situation (same TO_CALL > 0 or = 0 group); FOLD is only legal when facing a bet.
+- A change only affects the hands where its setting applies, so its effect on bb/deal over a whole match is small.
 
 Here are query results from our own match logs (Snowflake). Rows with EXPLORED=1 had a random action, so comparing
 actions among them is unbiased. Results are noisy; hand outcomes have a standard deviation of about 25 bb per deal.
@@ -174,21 +153,15 @@ fast (no loops over thousands of items), and add short comments. Do not read fil
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "optimize":     # hand over to the autonomous loop
+        import autotune
+        sys.exit(autotune.main(sys.argv[2:]))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    
-    # Export command
-    e = sub.add_parser("export"); e.add_argument("--out", default="results.txt")
-    e.set_defaults(fn=cmd_export)
-
-    # Analyze command
-    a = sub.add_parser("analyze"); a.add_argument("files", nargs="+"); a.add_agent = a.add_argument("--agent", default="agent.py")
+    a = sub.add_parser("analyze"); a.add_argument("files", nargs="+"); a.add_argument("--agent", default="agent.py")
     a.set_defaults(fn=cmd_analyze)
-
-    # Sparring command
     s = sub.add_parser("sparring"); s.add_argument("--name", required=True); s.add_argument("--style", required=True)
     s.set_defaults(fn=cmd_sparring)
-
     args = ap.parse_args(); args.fn(args)
 
 

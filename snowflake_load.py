@@ -27,6 +27,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import argparse, glob, os, shutil, sys
 
+import envfile
+envfile.load()                     # SNOWFLAKE_* from .env (shell variables win)
+
 DDL = {
     "DECISIONS": """CREATE TABLE IF NOT EXISTS DECISIONS (
         RUN_ID STRING, BOT_VERSION STRING, OPPONENT STRING, HALF INT, HAND_INDEX INT, STEP INT,

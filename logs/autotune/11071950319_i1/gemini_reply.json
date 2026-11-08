@@ -1,0 +1,12 @@
+{
+  "proposals": [
+    {
+      "setting": "RERAISE_PRE",
+      "value": [
+        0.50,
+        0.64
+      ],
+      "reason": "Local query 2a and 2d show preflop raise with equity 0.50 has very high profitability (AVG_NET_BB 17.000 for half-pot), supporting lowering the RERAISE_PRE half-pot threshold to 0.50."
+    }
+  ]
+}
