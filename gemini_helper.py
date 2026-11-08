@@ -27,7 +27,7 @@ import argparse, datetime, os, re, sys
 import envfile
 envfile.load()                     # GEMINI_API_KEY / GEMINI_MODEL from .env (shell variables win)
 
-MODEL =os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")  # gemini-2.5-flash now 404s for new keys
 
 GAME = """Game: heads-up Short Deck (36 cards, 6..A) 5-card Pot-Limit Omaha, 80-chip stacks (40 big blinds, big blind = 2),
 reset every hand. Hand = exactly 2 hole cards + exactly 3 board cards. Short-deck ranking: flush beats full house,

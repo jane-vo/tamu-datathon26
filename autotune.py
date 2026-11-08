@@ -310,7 +310,7 @@ def gemini_json(prompt):
         raise SystemExit("Set GEMINI_API_KEY in the .env file (or your shell), or pass --proposals-file.")
     from google import genai
     client = genai.Client(api_key=key)
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")  # gemini-2.5-flash now 404s for new keys
     last = None
     for attempt in range(3):
         try:
