@@ -9,7 +9,7 @@ Most teams will make their agent by using one-shot programming. We built a loop 
 
 ## 📖 Table of Contents
 - [The bot](#the-bot)
-- [The loop](#the-loop-snowflake-gemini)
+- [The loop](#the-loop)
 - [Snowflake: evidence layer](#snowflake-evidence-layer)
 - [Google AI Studio (Gemini): improvement engine](#google-ai-studio-gemini-improvement-engine)
 - [When a change is real](#when-a-change-is-real)
@@ -42,7 +42,7 @@ Most teams will make their agent by using one-shot programming. We built a loop 
 
 In five real HTTP judge matches against v3 (1000 deals each), v4 came out ahead every time: +0.54 to +0.71 bb/deal, pooled +0.63 [+0.31, +0.95]. Each single match is a CHOP, because one 1000-deal match against a close copy of itself can't separate an edge that small. v4 also used less of the time bank: 5.4–6.3 s against v3's 6.1–7.3 s.
 
-## The loop (Snowflake + Gemini)
+## The loop
 
 ```
   harness_log.py ──► logs/*.csv ──► snowflake_load.py ──► Snowflake (POKER_BOT)
